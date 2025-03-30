@@ -10,7 +10,7 @@ extern "C"
 
 #include<cstdio>
 
-#define N_ADC1_CHANNELS 4
+#define N_ADC1_CHANNELS 10
 #define N_SAMPLES 10
 
 int get_adc1_values(uint16_t *values);
@@ -45,8 +45,10 @@ void StartDefaultTask(void *pvParameters)
     for(;;) {
         HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
         get_adc1_values(values);
-        printf("ADC1 values: %u %u %u %u\n", values[0], values[1], values[2], values[3]);
-        printf("Tick count: %lu\n", xTaskGetTickCount());
+        printf("%lu: %u %u %u %u %u %u %u %u %u %u\n", xTaskGetTickCount(), values[0], values[1], values[2],
+            values[3], values[4], values[5], values[6], values[7], values[8], values[9]);
+        //printf("ADC1 values: %u %u %u %u\n", values[0], values[1], values[2], values[3]);
+        //printf("Tick count: %lu\n", xTaskGetTickCount());
         //vTaskDelay(pdMS_TO_TICKS(1000));
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
@@ -77,7 +79,7 @@ int get_adc1_values(uint16_t *values)
 
 	uint32_t temp_values[N_ADC1_CHANNELS] = {0};
 
-	 //read  channels (0,1,4, 6) of 8 bits  10 times
+	 //read  channels (0,1,4,6,7,8,9,10,11,12) of 8 bits  10 times
     HAL_ADC_Start_DMA(&hadc1, adc1Buffer, N_SAMPLES * N_ADC1_CHANNELS);
     //wait for the conversion to complete
     if (xSemaphoreTake( xAdc1_dma_complete, 2000) == pdTRUE ) {//portMAX_DELAY
