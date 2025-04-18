@@ -17,8 +17,8 @@ extern "C"
 #include "CircularBuffer.hpp"
 
 
-#define N_ADC1_CHANNELS 10
-#define N_SAMPLES 10
+#define N_ADC1_CHANNELS 5
+#define N_SAMPLES 5 
 
 int get_adc1_values(uint8_t *values);
 void adc1_task(void *pvParameters);
@@ -119,7 +119,7 @@ int get_adc1_values(uint8_t *values)
 
 	uint32_t temp_values[N_ADC1_CHANNELS] = {0};
 
-	 // Read  channels (0,1,4,6,7,8,9,10,11,12) of 8 bits  10 times
+	 // Read  channels (0,1,8,10,11) of 8 bits  5 times
     HAL_ADC_Start_DMA(&hadc1, adc1Buffer, N_SAMPLES * N_ADC1_CHANNELS);
     // Wait for the conversion to complete
     if (xSemaphoreTake( xadc1_dma_complete, 2000) == pdTRUE ) {//portMAX_DELAY
@@ -166,9 +166,8 @@ void uart_send_values_task(void *pvParameters)
                 timestamp_buffer.pop(&timestamp, 1);
                 //xSemaphoreGive(xc_buffer_mutex);
 
-                sprintf(buffer, "%lu:%u %u %u %u %u %u %u %u %u %u\n", timestamp, adc1_values[0],
-                    adc1_values[1], adc1_values[2], adc1_values[3], adc1_values[4], adc1_values[5], adc1_values[6], adc1_values[7],
-                    adc1_values[8], adc1_values[9]);
+                sprintf(buffer, "%lu:%u %u %u %u %u\n", timestamp, adc1_values[0],
+                    adc1_values[1], adc1_values[2], adc1_values[3], adc1_values[4]);
                 
                 if (uart_write(&huart2, (uint8_t *)buffer, strlen(buffer), 2000)) {
                     printf("Error sending data through UART\n");
