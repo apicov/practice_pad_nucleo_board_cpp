@@ -127,7 +127,9 @@ int main(void)
   /* USER CODE END 3 */
 }
 
-/**
+/**if (uart_write(&huart2, (uint8_t *)buffer, strlen(buffer), 2000)) {
+                    printf("Error sending data through UART\n");
+                }
   * @brief System Clock Configuration
   * @retval None
   */

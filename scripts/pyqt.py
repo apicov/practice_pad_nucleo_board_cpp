@@ -32,7 +32,7 @@ def extract_line(buffer):
     return line, buffer
 
 class SerialPlotter(QMainWindow):
-    def __init__(self, n_channels=5):
+    def __init__(self, n_channels=1):
         super().__init__()
 
         self.n_channels = n_channels  # Number of channels to read from the serial port
@@ -92,14 +92,16 @@ class SerialPlotter(QMainWindow):
             filename = f"../../piezo_data_{get_current_datetime()}.csv"
             try:
                 self.file = open(filename, 'w')
+                header = "timestamp,top,bottom,left,right,force\n"
+                self.file.write(header)
+                self.file.flush()
+                
             except Exception as e:
                 print(f"Error opening file: {e}")
                 return
             # Write header to file
             #header = "Timestamp," + ",".join([f"Channel {i+1}" for i in range(self.n_channels)]) + "\n"
-            header = "timestamp,top,bottom,left,right,force\n"
-            self.file.write(header)
-            self.file.flush()
+            
             # Start the timer to update the plot
             self.timer.start(100)  # Update every 100 ms
             self.start_button.setText("Stop Plotting")

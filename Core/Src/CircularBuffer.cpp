@@ -85,5 +85,5 @@ void CircularBuffer<T>::clear()
 }
 
 // Explicit instantiation for commonly used types (optional)
-template class CircularBuffer<uint32_t>; 
-template class CircularBuffer<uint8_t>;
+//template class CircularBuffer<uint32_t>; 
+//template class CircularBuffer<uint16_t>;
