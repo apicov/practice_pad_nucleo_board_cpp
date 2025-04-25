@@ -175,7 +175,7 @@ class SerialPlotter(QMainWindow):
             # Set x-axis limits to always show the last 100 points
             #self.ax.set_xlim(max(0, self.counter - 100), self.counter)
             self.ax.set_xlim(self.x_data[0], self.x_data[-1]) 
-            self.ax.set_ylim(0, 255.0) 
+            self.ax.set_ylim(-50, 130.0) 
             self.ax.set_xlabel('Time')
             self.ax.set_ylabel('Value')
             self.ax.set_title('Real-time Serial Data Plot') 

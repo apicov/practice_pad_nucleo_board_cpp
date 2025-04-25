@@ -22,16 +22,16 @@ extern "C"
 #define N_PEAK_CHANNELS 5
 
 typedef struct {
-    uint16_t values[N_ADC1_CHANNELS];
+    int16_t values[N_ADC1_CHANNELS];
     TickType_t timestamp;
 } adc1_data_t;
 
 typedef struct {
-    uint16_t values[N_PEAK_CHANNELS];
+    int16_t values[N_PEAK_CHANNELS];
     TickType_t timestamp;
 } peaks_t;
 
-int get_adc1_values(uint16_t *values);
+int get_adc1_values(int16_t *values);
 void adc1_task(void *pvParameters);
 void uart_send_values_task(void *pvParameters);
 void peaks_detector_task(void *pvParameters);
@@ -131,10 +131,10 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 
 static uint32_t adc1Buffer[N_ADC1_CHANNELS * N_SAMPLES];
 
-int get_adc1_values(uint16_t *values)
+int get_adc1_values(int16_t *values)
 {
 
-	uint32_t temp_values[N_ADC1_CHANNELS] = {0};
+	int32_t temp_values[N_ADC1_CHANNELS] = {0};
 
 	 // Read  channels (0,1,8,10,11) of 8 bits  5 times
     HAL_ADC_Start_DMA(&hadc1, adc1Buffer, N_SAMPLES * N_ADC1_CHANNELS);
@@ -147,17 +147,18 @@ int get_adc1_values(uint16_t *values)
             }
         }
 
-        // Get  means
+        // Calculate the average for each channel
+        // Divide the sum of each channel by the number of samples
         for (int i = 0 ; i < N_ADC1_CHANNELS ; i++) {
-            values[i] = (uint16_t) (temp_values[i] / N_SAMPLES);
+            values[i] = (int16_t) (temp_values[i] / N_SAMPLES);
         }
 
         //normalize according to calibration coefficients
-        values[0] = (uint16_t) ((values[0] * 0.81787) - 96.6632 ); //top
-        values[1] = (uint16_t) ((values[1] * 0.76373) - 91.18395 ); //bottom
-        values[2] = (uint16_t) ((values[2] * 1.04608) - 123.94094 ); //left
-        values[3] = (uint16_t) ((values[3] * 0.944475) - 113.7599 ); //right
-        values[4] = (uint16_t) ((values[4] * -0.18813) + 20.4944 ); //force
+        values[0] = (int16_t) ((values[0] * 0.81787) - 96.6632 ); //top
+        values[1] = (int16_t) ((values[1] * 0.76373) - 91.18395 ); //bottom
+        values[2] = (int16_t) ((values[2] * 1.04608) - 123.94094 ); //left
+        values[3] = (int16_t) ((values[3] * 0.944475) - 113.7599 ); //right
+        values[4] = (int16_t) ((values[4] * -0.18813) + 20.4944 ); //force
     
         HAL_ADC_Stop_DMA(&hadc1);
     
@@ -187,7 +188,7 @@ void uart_send_values_task(void *pvParameters)
                     adc1_buffer.pop(&adc1_values, 1);
                 xSemaphoreGive(xc_buffer_mutex);
 
-                sprintf(buffer, "%lu:%u %u %u %u %u\n", adc1_values.timestamp, adc1_values.values[0],
+                sprintf(buffer, "%lu:%d %d %d %d %d\n", adc1_values.timestamp, adc1_values.values[0],
                     adc1_values.values[1], adc1_values.values[2], adc1_values.values[3], adc1_values.values[4]);
 
                 
