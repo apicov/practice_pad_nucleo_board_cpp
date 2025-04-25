@@ -54,9 +54,9 @@ void cpp_main()
     if(xTaskCreate(&adc1_task, "adc task", 1024, NULL, 10, NULL) != pdPASS) {
         printf("Error creating adc1 task\n");
     }
-    //if(xTaskCreate(&uart_send_values_task, "send v task", 1024, NULL, 6, NULL) != pdPASS) {
-    //    printf("Error creating uart send values task\n");
-    //}
+    if(xTaskCreate(&uart_send_values_task, "send v task", 1024, NULL, 6, NULL) != pdPASS) {
+        printf("Error creating uart send values task\n");
+    }
     if(xTaskCreate(&peaks_detector_task, "peaks task", 1024, NULL, 7, NULL) != pdPASS) {
         printf("Error creating peaks_detector_task task\n");
     }
@@ -151,6 +151,13 @@ int get_adc1_values(uint16_t *values)
         for (int i = 0 ; i < N_ADC1_CHANNELS ; i++) {
             values[i] = (uint16_t) (temp_values[i] / N_SAMPLES);
         }
+
+        //normalize according to calibration coefficients
+        values[0] = (uint16_t) ((values[0] * 0.81787) - 96.6632 ); //top
+        values[1] = (uint16_t) ((values[1] * 0.76373) - 91.18395 ); //bottom
+        values[2] = (uint16_t) ((values[2] * 1.04608) - 123.94094 ); //left
+        values[3] = (uint16_t) ((values[3] * 0.944475) - 113.7599 ); //right
+        values[4] = (uint16_t) ((values[4] * -0.18813) + 20.4944 ); //force
     
         HAL_ADC_Stop_DMA(&hadc1);
     
@@ -182,6 +189,11 @@ void uart_send_values_task(void *pvParameters)
 
                 sprintf(buffer, "%lu:%u %u %u %u %u\n", adc1_values.timestamp, adc1_values.values[0],
                     adc1_values.values[1], adc1_values.values[2], adc1_values.values[3], adc1_values.values[4]);
+
+                
+
+                //sprintf(buffer, "%lu:%u %u %u %u\n", adc1_values.timestamp, adc1_values.values[0],
+                //    adc1_values.values[1], adc1_values.values[2], adc1_values.values[3]);
                 
                 if (uart_write(&huart2, (uint8_t *)buffer, strlen(buffer), 2000)) {
                     printf("Error sending data through UART\n");
@@ -226,59 +238,60 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 
-
 void peaks_detector_task(void *pvParameters)
 {
     UNUSED(pvParameters);
-    char buffer[100];        
-        adc1_data_t adc1_values;
-        size_t n_values;
-        TickType_t last_peak_time = 0;
-        int32_t prev = 0, current =  0;
-        int32_t peaks_count = 0;
+    //char buffer[100];        
+    adc1_data_t adc1_values;
+    size_t n_values;
+    TickType_t last_peak_time = 0;
+    int32_t prev = 0;
+    int32_t peaks_count = 0;
 
-        for(;;) {
+    for(;;) {
 
+        // Check if there are values in the buffer
+        xSemaphoreTake(xc_buffer_mutex, portMAX_DELAY);
+            n_values = peaks_task_buffer.element_count();
+        xSemaphoreGive(xc_buffer_mutex);
+
+        // If there are values, pop one from the buffer
+        if (n_values > 0) {
             xSemaphoreTake(xc_buffer_mutex, portMAX_DELAY);
-                n_values = peaks_task_buffer.element_count();
+                peaks_task_buffer.pop(&adc1_values, 1);
             xSemaphoreGive(xc_buffer_mutex);
 
-            if (n_values > 0) {
-                xSemaphoreTake(xc_buffer_mutex, portMAX_DELAY);
-                    peaks_task_buffer.pop(&adc1_values, 1);
-                xSemaphoreGive(xc_buffer_mutex);
-
-                // Calculate the sum of the values
-                int sum = 0;
-                for (int i = 0; i < N_PEAK_CHANNELS - 1; i++) {
-                    sum += adc1_values.values[i];
-                }
-                sum -= 480; //remove offset
-                if (sum < 50) {
-                    sum = 0;
-                }
-
-                if ( current > prev && current > sum && (current - prev) > 10 && (adc1_values.timestamp - last_peak_time) > 60) {
-                    // Peak detected
-                    peaks_count++;
-                    printf("Peak detected: %d %lu %u\n", current, adc1_values.timestamp - 2, peaks_count);
-                    last_peak_time = adc1_values.timestamp - 2;
-
-                }
-
-                prev = current;
-                current = sum;
-
-                sprintf(buffer, "%lu:%d\n", adc1_values.timestamp, sum);
-                if (uart_write(&huart2, (uint8_t *)buffer, strlen(buffer), 2000)) {
-                    printf("Error sending data through UART\n");
-                }
-                
-                //printf("%s", buffer);
-                //printf("p%lu\n",peaks_task_buffer.element_count());
+            // Calculate the average of the values
+            int sum = 0;
+            for (int i = 0; i < N_PEAK_CHANNELS - 1; i++) {
+                sum += adc1_values.values[i];
             }
-            else {
-                vTaskDelay(pdMS_TO_TICKS(10));
+            sum = sum >> 2;//sum /= 4;
+            
+            // Check if the sum is below a threshold
+            if (sum < 12) {
+                sum = 0;
             }
+
+            if ( sum > prev && (sum - prev) > 10 && (adc1_values.timestamp - last_peak_time) > 60) {
+                // Peak detected
+                peaks_count++;
+                printf("Peak detected: %d %lu %u\n", sum, adc1_values.timestamp, peaks_count);
+                last_peak_time = adc1_values.timestamp;
+
+            }
+
+            prev = sum;
+            //sprintf(buffer, "%lu:%d\n", adc1_values.timestamp, sum);
+            //if (uart_write(&huart2, (uint8_t *)buffer, strlen(buffer), 2000)) {
+            //    printf("Error sending data through UART\n");
+            //}
+            
+            //printf("%s", buffer);
+            //printf("p%lu\n",peaks_task_buffer.element_count());
         }
+        else {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
 }
