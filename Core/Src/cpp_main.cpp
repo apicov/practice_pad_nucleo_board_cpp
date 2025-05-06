@@ -54,9 +54,9 @@ void cpp_main()
     if(xTaskCreate(&adc1_task, "adc task", 1024, NULL, 10, NULL) != pdPASS) {
         printf("Error creating adc1 task\n");
     }
-    if(xTaskCreate(&uart_send_values_task, "send v task", 1024, NULL, 6, NULL) != pdPASS) {
-        printf("Error creating uart send values task\n");
-    }
+    //if(xTaskCreate(&uart_send_values_task, "send v task", 1024, NULL, 6, NULL) != pdPASS) {
+    //    printf("Error creating uart send values task\n");
+    //}
     if(xTaskCreate(&peaks_detector_task, "peaks task", 1024, NULL, 7, NULL) != pdPASS) {
         printf("Error creating peaks_detector_task task\n");
     }
@@ -242,7 +242,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 void peaks_detector_task(void *pvParameters)
 {
     UNUSED(pvParameters);
-    //char buffer[100];        
+    char buffer[100];        
     adc1_data_t adc1_values;
     size_t n_values;
     TickType_t last_peak_time = 0;
@@ -280,13 +280,21 @@ void peaks_detector_task(void *pvParameters)
                 printf("Peak detected: %d %lu %u\n", sum, adc1_values.timestamp, peaks_count);
                 last_peak_time = adc1_values.timestamp;
 
+                sprintf(buffer, "%lu:%d %d %d %d %d\n", adc1_values.timestamp, adc1_values.values[0],
+                    adc1_values.values[1], adc1_values.values[2], adc1_values.values[3], adc1_values.values[4]);
+                if (uart_write(&huart2, (uint8_t *)buffer, strlen(buffer), 2000)) {
+                    printf("Error sending data through UART\n");
+                }
+            }
+            else {
+                sprintf(buffer, "%lu:%d %d %d %d %d\n", adc1_values.timestamp, 0, 0, 0, 0, 0);
+                if (uart_write(&huart2, (uint8_t *)buffer, strlen(buffer), 2000)) {
+                    printf("Error sending data through UART\n");
+                }
             }
 
             prev = sum;
-            //sprintf(buffer, "%lu:%d\n", adc1_values.timestamp, sum);
-            //if (uart_write(&huart2, (uint8_t *)buffer, strlen(buffer), 2000)) {
-            //    printf("Error sending data through UART\n");
-            //}
+            
             
             //printf("%s", buffer);
             //printf("p%lu\n",peaks_task_buffer.element_count());
@@ -296,3 +304,5 @@ void peaks_detector_task(void *pvParameters)
         }
     }
 }
+
+
