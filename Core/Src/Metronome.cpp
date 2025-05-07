@@ -9,6 +9,11 @@ Metronome::Metronome(TIM_HandleTypeDef* timer, int bpm)
 void Metronome::start()
 {
     if (!running_) {
+        // Clear any pending interrupt flags
+        __HAL_TIM_CLEAR_FLAG(&htim3, TIM_FLAG_UPDATE);
+        // Reset the timer counter
+        __HAL_TIM_SET_COUNTER(timer_, 0); 
+
         HAL_TIM_Base_Start_IT(timer_);
         running_ = true;
     }
@@ -24,6 +29,9 @@ void Metronome::stop()
 
 void Metronome::set_tempo(int bpm)
 {
+     // Clear any pending interrupt flags
+    __HAL_TIM_CLEAR_FLAG(&htim3, TIM_FLAG_UPDATE);
+
     tempo_ = bpm;
     uint32_t timer_period = (600'000 / bpm) - 1; // Calculate the period in hundreds of microseconds
     __HAL_TIM_SET_AUTORELOAD(timer_, timer_period); // Set the timer period
@@ -31,7 +39,7 @@ void Metronome::set_tempo(int bpm)
     // set the timer prescaler to 8400
     // 8400 prescaler = 84 MHz / 8400 = 10 kHz
     // 10 kHz = 100 us
-    __HAL_TIM_SET_PRESCALER(timer_, 0); // Set the timer prescaler to 8400
+    __HAL_TIM_SET_PRESCALER(timer_, 8400 - 1); // Set the timer prescaler to 8400
 }
 
 bool Metronome::is_running() const
@@ -47,4 +55,11 @@ int Metronome::get_tempo() const
 void Metronome::register_tick_callback(tick_callback callback)
 {
     tick_callback_ = callback;
+}
+
+void Metronome::exec_tick_callback()
+{
+    if (tick_callback_) {
+        exec_tick_callback();
+    }
 }

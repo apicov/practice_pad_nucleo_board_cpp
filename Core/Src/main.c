@@ -27,6 +27,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "semphr.h"
 #include "cpp_main.h"
 /* USER CODE END Includes */
 
@@ -48,7 +49,6 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -60,7 +60,7 @@ void MX_FREERTOS_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+extern SemaphoreHandle_t xmetronome_timer_period_elapsed;
 /* USER CODE END 0 */
 
 /**
@@ -95,7 +95,7 @@ int main(void)
   MX_DMA_Init();
   MX_ADC1_Init();
   MX_USART2_UART_Init();
-  MX_TIM1_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   /* Init scheduler */
   osKernelInitialize();
@@ -127,9 +127,7 @@ int main(void)
   /* USER CODE END 3 */
 }
 
-/**if (uart_write(&huart2, (uint8_t *)buffer, strlen(buffer), 2000)) {
-                    printf("Error sending data through UART\n");
-                }
+/**
   * @brief System Clock Configuration
   * @retval None
   */
@@ -191,7 +189,18 @@ void SystemClock_Config(void)
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   /* USER CODE BEGIN Callback 0 */
-
+  if (htim->Instance == TIM3) {
+    // metronome tick
+    static portBASE_TYPE xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(xmetronome_timer_period_elapsed, &xHigherPriorityTaskWoken);
+    /* If giving a semaphore caused a task to unblock, and the unblocked task
+    has a priority equal to or higher than the currently running task (the task
+    this ISR interrupted), then higher_priority_task_woken will have
+    automatically been set to pdTRUE within the semaphore function.
+    portEND_SWITCHING_ISR() will then ensure that this ISR returns directly to
+    the higher priority unblocked task. */
+    portEND_SWITCHING_ISR(xHigherPriorityTaskWoken);
+  }
   /* USER CODE END Callback 0 */
   if (htim->Instance == TIM7) {
     HAL_IncTick();

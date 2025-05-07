@@ -15,7 +15,7 @@ extern "C"
 
 #include<cstdio>
 #include "CircularBuffer.hpp"
-
+#include "Metronome.hpp"
 
 #define N_ADC1_CHANNELS 5
 #define N_SAMPLES 5
@@ -35,6 +35,8 @@ int get_adc1_values(int16_t *values);
 void adc1_task(void *pvParameters);
 void uart_send_values_task(void *pvParameters);
 void peaks_detector_task(void *pvParameters);
+void metronome_tick_task(void *pvParameters);
+
 
 SemaphoreHandle_t xadc1_dma_complete = xSemaphoreCreateBinary();
 
@@ -46,10 +48,15 @@ CircularBuffer<adc1_data_t> peaks_task_buffer(50);
 
 SemaphoreHandle_t xc_buffer_mutex;
 
+Metronome *metronome;
+SemaphoreHandle_t xmetronome_timer_period_elapsed = xSemaphoreCreateBinary();
+
 void cpp_main()
 {
     printf("Hello from C++!\n");
     xc_buffer_mutex = xSemaphoreCreateMutex();
+    metronome = new Metronome(&htim3, 120);
+    metronome->start();
     // Create tasks
     if(xTaskCreate(&adc1_task, "adc task", 1024, NULL, 10, NULL) != pdPASS) {
         printf("Error creating adc1 task\n");
@@ -59,6 +66,9 @@ void cpp_main()
     //}
     if(xTaskCreate(&peaks_detector_task, "peaks task", 1024, NULL, 7, NULL) != pdPASS) {
         printf("Error creating peaks_detector_task task\n");
+    }
+    if(xTaskCreate(&metronome_tick_task, "metronome task", 1024, NULL, 6, NULL) != pdPASS) {
+        printf("Error creating metronome task\n");
     }
 
     /* Start scheduler */
@@ -87,7 +97,7 @@ void adc1_task(void *pvParameters)
     //HAL_TIM_Base_Start(&htim1);
 
     for(;;) {
-        HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+        //HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
         
         if (get_adc1_values(raw_data.values) == -1) {
             printf("Error reading ADC1 values\n");
@@ -216,7 +226,7 @@ int uart_write(UART_HandleTypeDef *huart,uint8_t *pData, uint16_t Size, long uns
 	HAL_UART_Transmit_DMA(huart,pData, Size);
 
 	if (xSemaphoreTake( xusart_tx_complete, timeout) == pdTRUE ) {// portMAX_DELAY
-	    HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+	    //HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
         //HAL_UART_DMAStop(huart);
 		return 0;
 	}
@@ -306,3 +316,18 @@ void peaks_detector_task(void *pvParameters)
 }
 
 
+void metronome_tick_task(void *pvParameters)
+{
+    UNUSED(pvParameters);
+    unsigned long int last_time = 0;
+
+    while (1) {
+        xSemaphoreTake(xmetronome_timer_period_elapsed, portMAX_DELAY);
+        //last_time = __HAL_TIM_GET_COUNTER(&htim3);
+        printf("Metronome tick: %lu\n", xTaskGetTickCount());
+        //vTaskDelay(pdMS_TO_TICKS(1000));
+        //printf("Metronome tick\n");
+        HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+    }
+
+}
