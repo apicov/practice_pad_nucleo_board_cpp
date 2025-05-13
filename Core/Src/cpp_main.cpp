@@ -27,14 +27,15 @@ typedef struct {
 } adc1_data_t;
 
 typedef struct {
-    int16_t values[N_PEAK_CHANNELS];
-    TickType_t timestamp;
-} peaks_t;
+    adc1_data_t sensor;
+    TickType_t metronome_tick_timestamp;
+} strike_t;
 
+bool is_strike(adc1_data_t *values);
 int get_adc1_values(int16_t *values);
-void adc1_task(void *pvParameters);
+void sampling_task(void *pvParameters);
 void uart_send_values_task(void *pvParameters);
-void peaks_detector_task(void *pvParameters);
+void strike_task(void *pvParameters);
 void metronome_tick_task(void *pvParameters);
 
 
@@ -44,28 +45,40 @@ int uart_write(UART_HandleTypeDef *huart,uint8_t *pData, uint16_t Size, long uns
 SemaphoreHandle_t xusart_tx_complete = xSemaphoreCreateBinary();
 
 CircularBuffer<adc1_data_t> adc1_buffer(50);
-CircularBuffer<adc1_data_t> peaks_task_buffer(50);
+CircularBuffer<strike_t> strikes_buffer(50);
 
 SemaphoreHandle_t xc_buffer_mutex;
 
 Metronome *metronome;
 SemaphoreHandle_t xmetronome_timer_period_elapsed = xSemaphoreCreateBinary();
 
+QueueHandle_t strikes_queue;
+
 void cpp_main()
 {
     printf("Hello from C++!\n");
+    
     xc_buffer_mutex = xSemaphoreCreateMutex();
-    metronome = new Metronome(&htim3, 120);
+    if (xc_buffer_mutex == NULL) {
+        // Handle error
+        printf("Error creating mutex\n");
+    }
+    strikes_queue = xQueueCreate(5, sizeof(strike_t));
+    if (strikes_queue == NULL) {
+        // Handle error
+        printf("Error creating queue\n");
+    }
+    metronome = new Metronome(&htim3, 60);
     metronome->start();
     // Create tasks
-    if(xTaskCreate(&adc1_task, "adc task", 1024, NULL, 10, NULL) != pdPASS) {
-        printf("Error creating adc1 task\n");
+    if(xTaskCreate(&sampling_task, "sampling task", 1024, NULL, 10, NULL) != pdPASS) {
+        printf("Error creating sampling task\n");
     }
     //if(xTaskCreate(&uart_send_values_task, "send v task", 1024, NULL, 6, NULL) != pdPASS) {
     //    printf("Error creating uart send values task\n");
     //}
-    if(xTaskCreate(&peaks_detector_task, "peaks task", 1024, NULL, 7, NULL) != pdPASS) {
-        printf("Error creating peaks_detector_task task\n");
+    if(xTaskCreate(&strike_task, "strike task", 1024, NULL, 7, NULL) != pdPASS) {
+        printf("Error creating strike detected task\n");
     }
     if(xTaskCreate(&metronome_tick_task, "metronome task", 1024, NULL, 6, NULL) != pdPASS) {
         printf("Error creating metronome task\n");
@@ -77,28 +90,20 @@ void cpp_main()
     while (1);
 }
 
-void adc1_task(void *pvParameters)
+void sampling_task(void *pvParameters)
 {
     UNUSED(pvParameters);
     // To store the ADC values
     //uint16_t values[N_ADC1_CHANNELS];
     adc1_data_t raw_data;
+    strike_t strike_data;
     TickType_t xLastWakeTime;
-    const TickType_t xFrequency = pdMS_TO_TICKS(10); //
+    const TickType_t xFrequency = pdMS_TO_TICKS(10);
 
     // Initialize xLastWakeTime with the current tick count
     xLastWakeTime = xTaskGetTickCount();
-
-     // Start the timer
-    //HAL_TIM_Base_Start_IT(&htim1);
-
-    //unsigned long int last_time = 0;
-    // Start the timer
-    //HAL_TIM_Base_Start(&htim1);
-
-    for(;;) {
-        //HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-        
+    for(;;) {        
+        // Start the ADC conversion
         if (get_adc1_values(raw_data.values) == -1) {
             printf("Error reading ADC1 values\n");
             continue;
@@ -108,9 +113,16 @@ void adc1_task(void *pvParameters)
         raw_data.timestamp = xTaskGetTickCount();
         xSemaphoreTake(xc_buffer_mutex, portMAX_DELAY);
             adc1_buffer.push(&raw_data, 1);
-            peaks_task_buffer.push(&raw_data, 1);
+            //peaks_task_buffer.push(&raw_data, 1);
         xSemaphoreGive(xc_buffer_mutex);
         
+        // Detect drum strike
+        if (is_strike(&raw_data)) {
+            strike_data.sensor = raw_data;
+            strike_data.metronome_tick_timestamp = metronome->get_last_tick_time();
+            // send strike and metronome tick timestamp to queue
+            xQueueSend(strikes_queue, &strike_data, portMAX_DELAY);
+        }
 
         //printf("%s", buffer);
         //last_time = __HAL_TIM_GET_COUNTER(&htim1);
@@ -148,8 +160,10 @@ int get_adc1_values(int16_t *values)
 
 	 // Read  channels (0,1,8,10,11) of 8 bits  5 times
     HAL_ADC_Start_DMA(&hadc1, adc1Buffer, N_SAMPLES * N_ADC1_CHANNELS);
+
     // Wait for the conversion to complete
     if (xSemaphoreTake( xadc1_dma_complete, 2000) == pdTRUE ) {//portMAX_DELAY
+
         // Channel values are interleaved, sum values of each channel
         for (int i = 0 ; i < ( N_SAMPLES * N_ADC1_CHANNELS) ; i += N_ADC1_CHANNELS) {
             for (int j = 0 ; j < N_ADC1_CHANNELS ; j++) {
@@ -249,44 +263,64 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 
-void peaks_detector_task(void *pvParameters)
+bool is_strike(adc1_data_t *values)
+{
+    static int32_t prev_sum = 0;
+    static TickType_t last_strike_time = 0;
+
+    // Calculate the average of the values
+    int sum = 0;
+    // TODO: remove the extra unused channel
+    for (int i = 0; i < N_ADC1_CHANNELS - 1; i++) {
+        sum += values->values[i];
+    }
+    sum = sum >> 2;//sum /= 4;
+    // Check if the sum is below a threshold
+    if (sum < 12) {
+        sum = 0;
+    }
+    // Check if the difference between the current and previous values is above a threshold
+    if ( sum > prev_sum && (sum - prev_sum) > 10 && (values->timestamp - last_strike_time) > 60) {
+        // Peak detected
+        last_strike_time = values->timestamp;
+        prev_sum = sum;
+        return true;
+    }
+
+    prev_sum = sum;
+    return false;
+}
+
+void strike_task(void *pvParameters)
 {
     UNUSED(pvParameters);
     char buffer[100];        
-    adc1_data_t adc1_values;
-    size_t n_values;
-    TickType_t last_peak_time = 0;
-    int32_t prev = 0;
-    int32_t peaks_count = 0;
+    strike_t strike_data;
+    TickType_t time_diff; // difference between the strike and metronome tick timestamps
 
     for(;;) {
+        // wait for a strike to be detected (element in queue)
+        if (xQueueReceive(strikes_queue, &strike_data, portMAX_DELAY) == pdTRUE) {
+            // strike was before the metronome tick            
+            if (strike_data.sensor.timestamp > 
+                (strike_data.metronome_tick_timestamp + metronome->get_half_period())) {
 
-        // Check if there are values in the buffer
-        xSemaphoreTake(xc_buffer_mutex, portMAX_DELAY);
-            n_values = peaks_task_buffer.element_count();
-        xSemaphoreGive(xc_buffer_mutex);
+                time_diff = strike_data.metronome_tick_timestamp + metronome->get_period()
+                             - strike_data.sensor.timestamp;
 
-        // If there are values, pop one from the buffer
-        if (n_values > 0) {
-            xSemaphoreTake(xc_buffer_mutex, portMAX_DELAY);
-                peaks_task_buffer.pop(&adc1_values, 1);
-            xSemaphoreGive(xc_buffer_mutex);
-
-            // Calculate the average of the values
-            int sum = 0;
-            for (int i = 0; i < N_PEAK_CHANNELS - 1; i++) {
-                sum += adc1_values.values[i];
+                printf("Strike. Time diff: +%lu\n", time_diff);
             }
-            sum = sum >> 2;//sum /= 4;
+            // strike was after the metronome tick
+            else {
+                time_diff = strike_data.sensor.timestamp - strike_data.metronome_tick_timestamp;
+                printf("Strike. Time diff: -%lu\n", time_diff);
+
+            }
             
-            // Check if the sum is below a threshold
-            if (sum < 12) {
-                sum = 0;
-            }
+        }
 
-            if ( sum > prev && (sum - prev) > 10 && (adc1_values.timestamp - last_peak_time) > 60) {
-                // Peak detected
-                peaks_count++;
+        
+    /*
                 printf("Peak detected: %d %lu %u\n", sum, adc1_values.timestamp, peaks_count);
                 last_peak_time = adc1_values.timestamp;
 
@@ -307,8 +341,7 @@ void peaks_detector_task(void *pvParameters)
             
             
             //printf("%s", buffer);
-            //printf("p%lu\n",peaks_task_buffer.element_count());
-        }
+            //printf("p%lu\n",peaks_task_buffer.element_count());*/
         else {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
@@ -319,15 +352,18 @@ void peaks_detector_task(void *pvParameters)
 void metronome_tick_task(void *pvParameters)
 {
     UNUSED(pvParameters);
-    unsigned long int last_time = 0;
 
     while (1) {
         xSemaphoreTake(xmetronome_timer_period_elapsed, portMAX_DELAY);
-        //last_time = __HAL_TIM_GET_COUNTER(&htim3);
-        printf("Metronome tick: %lu\n", xTaskGetTickCount());
+        metronome->tick();
+        
         //vTaskDelay(pdMS_TO_TICKS(1000));
         //printf("Metronome tick\n");
-        HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+
+        //blink metronome's led
+        HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
     }
 
 }
