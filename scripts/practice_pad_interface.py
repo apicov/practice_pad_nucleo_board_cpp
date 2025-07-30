@@ -69,30 +69,54 @@ class SerialController(QObject):
             return "ERROR: Not connected"
         
         try:
+            # Clear any stale data from input buffer first
+            self.serial_port.reset_input_buffer()
+            
             # Send command
             self.serial_port.write(f"{command}\n".encode())
             self.serial_port.flush()
             
-            # Read response with timeout and error handling
+            # Read response with improved buffering
             response = ""
             start_time = time.time()
+            buffer = ""
+            
             while time.time() - start_time < 2.0:  # 2 second timeout
                 if self.serial_port.in_waiting > 0:
                     try:
-                        raw_response = self.serial_port.readline()
-                        line = raw_response.decode('utf-8', errors='replace').strip()
-                        # Filter out non-printable characters except newlines
-                        line = ''.join(char for char in line if char.isprintable() or char in '\r\n').strip()
+                        # Read ALL available data at once
+                        raw_data = self.serial_port.read(self.serial_port.in_waiting)
+                        new_data = raw_data.decode('utf-8', errors='replace')
+                        buffer += new_data
                         
-                        # Only accept lines that start with CMD_ (command responses)
-                        if line.startswith('CMD_'):
-                            response = line
+                        # Process all complete lines in buffer
+                        lines = buffer.split('\n')
+                        # Keep the last incomplete line in buffer for next iteration
+                        if not buffer.endswith('\n'):
+                            buffer = lines[-1]  # Keep incomplete line
+                            lines = lines[:-1]  # Process only complete lines
+                        else:
+                            buffer = ""  # All lines were complete
+                        
+                        # Find the most recent CMD_ response
+                        cmd_responses = []
+                        for line in lines:
+                            line = line.strip()
+                            # Filter out non-printable characters
+                            line = ''.join(char for char in line if char.isprintable() or char in '\r\n').strip()
+                            
+                            if line.startswith('CMD_'):
+                                cmd_responses.append(line)
+                        
+                        # Use the LAST (most recent) CMD_ response found
+                        if cmd_responses:
+                            response = cmd_responses[-1]
                             break
-                        # Ignore other debug output and continue reading
-                        
+                            
                     except UnicodeDecodeError as e:
                         self.status_updated.emit(f"Decode error: {str(e)}")
                         continue
+                
                 time.sleep(0.01)
             
             if response:

@@ -508,8 +508,12 @@ void process_command(char* command, char* response)
     newline = strchr(command, '\r');
     if (newline) *newline = '\0';
     
-    // Parse command
+    // Debug: print the received command
+    printf("Processing command: '%s' (len=%d)\n", command, strlen(command));
+    
+    // Parse command with debugging
     if (strncmp(command, "SET_BPM ", 8) == 0) {
+        printf("Matched SET_BPM\n");
         int bpm = atoi(command + 8);
         if (bpm >= 40 && bpm <= 200) {
             metronome->set_tempo(bpm);
@@ -519,25 +523,31 @@ void process_command(char* command, char* response)
         }
     }
     else if (strncmp(command, "GET_BPM", 7) == 0) {
+        printf("Matched GET_BPM\n");
         sprintf(response, "CMD_RESP BPM %d\r\n", metronome->get_tempo());
     }
     else if (strncmp(command, "START", 5) == 0) {
+        printf("Matched START\n");
         metronome->start();
         sprintf(response, "CMD_OK Metronome started\r\n");
     }
     else if (strncmp(command, "STOP", 4) == 0) {
+        printf("Matched STOP\n");
         metronome->stop();
         sprintf(response, "CMD_OK Metronome stopped\r\n");
     }
     else if (strncmp(command, "STATUS", 6) == 0) {
+        printf("Matched STATUS\n");
         sprintf(response, "CMD_RESP STATUS BPM:%d RUNNING:%s\r\n", 
                 metronome->get_tempo(), 
                 metronome->is_running() ? "YES" : "NO");
     }
     else if (strncmp(command, "PING", 4) == 0) {
+        printf("Matched PING\n");
         sprintf(response, "CMD_RESP PONG\r\n");
     }
     else {
+        printf("No match found\n");
         sprintf(response, "CMD_ERROR Unknown command: %s\r\n", command);
     }
 }
