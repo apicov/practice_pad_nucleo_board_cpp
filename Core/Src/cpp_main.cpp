@@ -39,6 +39,9 @@ void uart_send_values_task(void *pvParameters);
 void strike_task(void *pvParameters);
 void metronome_tick_task(void *pvParameters);
 void command_interface_task(void *pvParameters);
+void init_practice_session(void);
+void update_practice_stats(int32_t timing_offset);
+void reset_practice_stats(void);
 void init_uart_rx_dma(void);
 int uart_read_line_dma(char* buffer, size_t max_len, uint32_t timeout);
 
@@ -48,6 +51,7 @@ SemaphoreHandle_t xadc1_dma_complete = xSemaphoreCreateBinary();
 int uart_write(UART_HandleTypeDef *huart,uint8_t *pData, uint16_t Size, long unsigned int timeout);
 SemaphoreHandle_t xusart_tx_complete = xSemaphoreCreateBinary();
 SemaphoreHandle_t xusart_rx_complete = xSemaphoreCreateBinary();
+SemaphoreHandle_t xuart_tx_mutex;
 
 // DMA circular buffer for UART RX
 #define UART_RX_BUFFER_SIZE 128
@@ -64,6 +68,21 @@ SemaphoreHandle_t xmetronome_timer_period_elapsed = xSemaphoreCreateBinary();
 
 QueueHandle_t strikes_queue;
 
+// Practice Analytics Data
+typedef struct {
+    uint32_t total_strikes;
+    uint32_t accurate_strikes;  // Within ±50ms
+    uint32_t early_strikes;
+    uint32_t late_strikes;
+    int32_t avg_timing_offset;  // Average timing offset in ms
+    uint32_t session_start_time;
+    uint32_t session_duration;
+    bool session_active;
+} practice_stats_t;
+
+static practice_stats_t current_session;
+static bool practice_mode_active = false;
+
 void cpp_main()
 {
     printf("Hello from C++!\n");
@@ -72,6 +91,12 @@ void cpp_main()
     if (xc_buffer_mutex == NULL) {
         // Handle error
         printf("Error creating mutex\n");
+    }
+    
+    xuart_tx_mutex = xSemaphoreCreateMutex();
+    if (xuart_tx_mutex == NULL) {
+        // Handle error
+        printf("Error creating UART TX mutex\n");
     }
     strikes_queue = xQueueCreate(5, sizeof(strike_t));
     if (strikes_queue == NULL) {
@@ -83,6 +108,9 @@ void cpp_main()
     
     // Initialize UART RX DMA
     init_uart_rx_dma();
+    
+    // Initialize practice session
+    init_practice_session();
     // Create tasks
     printf("Creating tasks... Initial heap: %u bytes\n", xPortGetFreeHeapSize());
     
@@ -326,25 +354,34 @@ void strike_task(void *pvParameters)
 {
     UNUSED(pvParameters);
     strike_t strike_data;
-    TickType_t time_diff; // difference between the strike and metronome tick timestamps
+    int32_t time_diff; // difference between the strike and metronome tick timestamps (signed)
 
     for(;;) {
         // wait for a strike to be detected (element in queue)
         if (xQueueReceive(strikes_queue, &strike_data, portMAX_DELAY) == pdTRUE) {
-            // strike was before the metronome tick            
-            if (strike_data.sensor.timestamp > 
-                (strike_data.metronome_tick_timestamp + metronome->get_half_period())) {
-
-                time_diff = strike_data.metronome_tick_timestamp + metronome->get_period()
-                             - strike_data.sensor.timestamp;
-
-                printf("Strike. Time diff: +%lu\n", time_diff);
+            // Calculate difference from last metronome tick (both in ticks)
+            time_diff = (int32_t)(strike_data.sensor.timestamp - strike_data.metronome_tick_timestamp);
+            
+            // Debug: print raw values
+            printf("DEBUG: strike=%lu, metro=%lu, raw_diff=%ld, half_period=%lu, period=%lu\n",
+                   strike_data.sensor.timestamp, strike_data.metronome_tick_timestamp, 
+                   (long)time_diff, metronome->get_half_period(), metronome->get_period());
+            
+            // Determine if strike belongs to last tick (late) or next tick (early)
+            if (time_diff <= (int32_t)metronome->get_half_period()) {
+                // Strike is within half period → late for the previous tick
+                printf("Strike. Time diff: +%ld ms (late for beat, practice_mode: %s)\n", 
+                       (long)time_diff, practice_mode_active ? "ON" : "OFF");
+            } else {
+                // Strike is beyond half period → early for the next tick
+                time_diff = time_diff - (int32_t)metronome->get_period();
+                printf("Strike. Time diff: %ld ms (early for next beat, practice_mode: %s)\n", 
+                       (long)time_diff, practice_mode_active ? "ON" : "OFF");
             }
-            // strike was after the metronome tick
-            else {
-                time_diff = strike_data.sensor.timestamp - strike_data.metronome_tick_timestamp;
-                printf("Strike. Time diff: -%lu\n", time_diff);
-
+            
+            // Update practice stats if in practice mode
+            if (practice_mode_active) {
+                update_practice_stats(time_diff);
             }
             
         }
@@ -396,6 +433,53 @@ void metronome_tick_task(void *pvParameters)
         HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
     }
 
+}
+
+// Practice Analytics Functions
+void init_practice_session(void)
+{
+    memset(&current_session, 0, sizeof(practice_stats_t));
+    practice_mode_active = false;
+    printf("Practice session initialized\n");
+}
+
+void reset_practice_stats(void)
+{
+    memset(&current_session, 0, sizeof(practice_stats_t));
+    current_session.session_start_time = xTaskGetTickCount();
+    printf("Practice statistics reset\n");
+}
+
+void update_practice_stats(int32_t timing_offset)
+{
+    current_session.total_strikes++;
+    
+    // Convert timing offset to milliseconds (1000Hz tick rate = 1ms per tick)
+    int32_t offset_ms = timing_offset;
+    
+    // Update running average of timing offset (using incremental formula to avoid overflow)
+    if (current_session.total_strikes == 1) {
+        current_session.avg_timing_offset = offset_ms;
+    } else {
+        // Incremental average: avg_new = avg_old + (new_value - avg_old) / count
+        current_session.avg_timing_offset = current_session.avg_timing_offset + 
+            (offset_ms - current_session.avg_timing_offset) / (int32_t)current_session.total_strikes;
+    }
+    
+    // Categorize the strike based on timing accuracy
+    if (abs(offset_ms) <= 50) {  // Within ±50ms is considered accurate
+        current_session.accurate_strikes++;
+    }
+    
+    if (offset_ms < 0) {  // Negative means early (before the beat)
+        current_session.early_strikes++;
+    } else if (offset_ms > 0) {  // Positive means late (after the beat)
+        current_session.late_strikes++;
+    }
+    
+    printf("Practice stats: Total:%lu, Accurate:%lu, Early:%lu, Late:%lu\n", 
+           current_session.total_strikes, current_session.accurate_strikes,
+           current_session.early_strikes, current_session.late_strikes);
 }
 
 // Command processing functions
@@ -512,49 +596,96 @@ void process_command(char* command, char* response)
     printf("Processing command: '%s' (len=%d)\n", command, strlen(command));
     
     // Parse command with debugging
+    printf("Testing START_PRACTICE: strncmp result = %d\n", strncmp(command, "START_PRACTICE", 14));
+    
     if (strncmp(command, "SET_BPM ", 8) == 0) {
         printf("Matched SET_BPM\n");
         int bpm = atoi(command + 8);
         if (bpm >= 40 && bpm <= 200) {
             metronome->set_tempo(bpm);
-            sprintf(response, "CMD_OK BPM set to %d\r\n", bpm);
+            sprintf(response, "CMD_OK BPM set to %d\n", bpm);
         } else {
-            sprintf(response, "CMD_ERROR BPM must be between 40 and 200\r\n");
+            sprintf(response, "CMD_ERROR BPM must be between 40 and 200\n");
         }
     }
     else if (strncmp(command, "GET_BPM", 7) == 0) {
         printf("Matched GET_BPM\n");
-        sprintf(response, "CMD_RESP BPM %d\r\n", metronome->get_tempo());
+        sprintf(response, "CMD_RESP BPM %d\n", metronome->get_tempo());
+    }
+    else if (strncmp(command, "START_PRACTICE", 14) == 0) {
+        printf("Matched START_PRACTICE\n");
+        reset_practice_stats();
+        practice_mode_active = true;
+        current_session.session_active = true;
+        current_session.session_start_time = xTaskGetTickCount();
+        sprintf(response, "CMD_OK Practice session started\n");
+    }
+    else if (strncmp(command, "STOP_PRACTICE", 13) == 0) {
+        printf("Matched STOP_PRACTICE\n");
+        practice_mode_active = false;
+        current_session.session_active = false;
+        current_session.session_duration = (xTaskGetTickCount() - current_session.session_start_time) / 1000;
+        sprintf(response, "CMD_OK Practice session stopped\n");
     }
     else if (strncmp(command, "START", 5) == 0) {
         printf("Matched START\n");
         metronome->start();
-        sprintf(response, "CMD_OK Metronome started\r\n");
+        sprintf(response, "CMD_OK Metronome started\n");
     }
     else if (strncmp(command, "STOP", 4) == 0) {
         printf("Matched STOP\n");
         metronome->stop();
-        sprintf(response, "CMD_OK Metronome stopped\r\n");
+        sprintf(response, "CMD_OK Metronome stopped\n");
     }
     else if (strncmp(command, "STATUS", 6) == 0) {
         printf("Matched STATUS\n");
-        sprintf(response, "CMD_RESP STATUS BPM:%d RUNNING:%s\r\n", 
+        sprintf(response, "CMD_RESP STATUS BPM:%d RUNNING:%s\n", 
                 metronome->get_tempo(), 
                 metronome->is_running() ? "YES" : "NO");
     }
     else if (strncmp(command, "PING", 4) == 0) {
         printf("Matched PING\n");
-        sprintf(response, "CMD_RESP PONG\r\n");
+        sprintf(response, "CMD_RESP PONG\n");
+    }
+    else if (strncmp(command, "GET_STATS", 9) == 0) {
+        printf("Matched GET_STATS\n");
+        if (current_session.total_strikes > 0) {
+            uint32_t accuracy = (current_session.accurate_strikes * 100) / current_session.total_strikes;
+            sprintf(response, "CMD_RESP STATS TOTAL:%lu ACC:%lu EARLY:%lu LATE:%lu ACCURACY:%lu%% AVGOFF:%ld\n",
+                    current_session.total_strikes, current_session.accurate_strikes, 
+                    current_session.early_strikes, current_session.late_strikes,
+                    accuracy, current_session.avg_timing_offset);
+        } else {
+            sprintf(response, "CMD_RESP STATS TOTAL:0 ACC:0 EARLY:0 LATE:0 ACCURACY:0%% AVGOFF:0\n");
+        }
+        printf("Sending GET_STATS response: '%s'\n", response);
+    }
+    else if (strncmp(command, "RESET_STATS", 11) == 0) {
+        printf("Matched RESET_STATS\n");
+        reset_practice_stats();
+        sprintf(response, "CMD_OK Statistics reset\n");
     }
     else {
         printf("No match found\n");
-        sprintf(response, "CMD_ERROR Unknown command: %s\r\n", command);
+        sprintf(response, "CMD_ERROR Unknown command: %s\n", command);
     }
 }
 
 void send_response(const char* response)
 {
-    uart_write(&huart2, (uint8_t*)response, strlen(response), 2000);
+    // Protect UART transmission with mutex to prevent concurrent access
+    if (xSemaphoreTake(xuart_tx_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        printf("Sending response: '%s' (len=%d)\n", response, strlen(response));
+        int result = uart_write(&huart2, (uint8_t*)response, strlen(response), 5000);  // Increased timeout
+        if (result != 0) {
+            printf("UART write failed: %d\n", result);
+        } else {
+            printf("UART write successful\n");
+        }
+        xSemaphoreGive(xuart_tx_mutex);
+    } else {
+        printf("UART TX mutex timeout - skipping response\n");
+    }
 }
 
 int uart_read_line(char* buffer, size_t max_len, uint32_t timeout)
