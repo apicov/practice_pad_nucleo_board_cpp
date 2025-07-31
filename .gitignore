@@ -2,3 +2,6 @@
 build
 private_data.h
 
+# Practice pad database files
+scripts/practice_pad_data.db
+scripts/*.db

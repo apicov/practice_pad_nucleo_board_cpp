@@ -44,12 +44,17 @@ class PracticeDatabase:
                 accurate_strikes INTEGER DEFAULT 0,
                 early_strikes INTEGER DEFAULT 0,
                 late_strikes INTEGER DEFAULT 0,
+                missed_beats INTEGER DEFAULT 0,
+                total_beats INTEGER DEFAULT 0,
                 accuracy_percentage REAL DEFAULT 0.0,
                 avg_timing_offset INTEGER DEFAULT 0,
                 notes TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        # Migrate existing table if needed (add missing columns)
+        self.migrate_database(cursor)
         
         # Daily practice summary table
         cursor.execute('''
@@ -67,6 +72,24 @@ class PracticeDatabase:
         conn.commit()
         conn.close()
     
+    def migrate_database(self, cursor):
+        """Migrate existing database to add new columns if they don't exist"""
+        try:
+            # Check if missed_beats column exists
+            cursor.execute("PRAGMA table_info(practice_sessions)")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            if 'missed_beats' not in columns:
+                print("Migrating database: adding missed_beats column")
+                cursor.execute("ALTER TABLE practice_sessions ADD COLUMN missed_beats INTEGER DEFAULT 0")
+            
+            if 'total_beats' not in columns:
+                print("Migrating database: adding total_beats column")
+                cursor.execute("ALTER TABLE practice_sessions ADD COLUMN total_beats INTEGER DEFAULT 0")
+                
+        except Exception as e:
+            print(f"Database migration error (non-fatal): {e}")
+    
     def save_session(self, session_data):
         """Save a complete practice session"""
         conn = sqlite3.connect(self.db_path)
@@ -75,9 +98,9 @@ class PracticeDatabase:
         cursor.execute('''
             INSERT INTO practice_sessions 
             (start_time, end_time, duration_seconds, bpm, total_strikes, 
-             accurate_strikes, early_strikes, late_strikes, accuracy_percentage, 
-             avg_timing_offset, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             accurate_strikes, early_strikes, late_strikes, missed_beats, 
+             total_beats, accuracy_percentage, avg_timing_offset, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             session_data['start_time'],
             session_data['end_time'], 
@@ -87,6 +110,8 @@ class PracticeDatabase:
             session_data['accurate_strikes'],
             session_data['early_strikes'],
             session_data['late_strikes'],
+            session_data['missed_beats'],
+            session_data['total_beats'],
             session_data['accuracy_percentage'],
             session_data['avg_timing_offset'],
             session_data.get('notes', '')
@@ -193,10 +218,10 @@ class PracticeDatabase:
         conn.close()
         
         return {
-            'total_sessions': total_sessions or 0,
-            'total_time_hours': (total_time or 0) / 3600,
-            'best_accuracy': best_accuracy,
-            'recent_avg_accuracy': sum(recent_accuracies) / len(recent_accuracies) if recent_accuracies else 0
+            'total_sessions': int(total_sessions or 0),
+            'total_time_hours': float(total_time or 0) / 3600,
+            'best_accuracy': float(best_accuracy or 0),
+            'recent_avg_accuracy': float(sum(recent_accuracies) / len(recent_accuracies)) if recent_accuracies else 0.0
         }
 
 
@@ -487,6 +512,11 @@ class PracticeWidget(QWidget):
         self.late_label.setStyleSheet("QLabel { font-weight: bold; color: #2196F3; }")
         stats_layout.addWidget(self.late_label, 3, 1)
         
+        stats_layout.addWidget(QLabel("Missed Beats:"), 4, 0)
+        self.missed_label = QLabel("0")
+        self.missed_label.setStyleSheet("QLabel { font-weight: bold; color: #f44336; }")
+        stats_layout.addWidget(self.missed_label, 4, 1)
+        
         stats_layout.addWidget(QLabel("Accuracy:"), 0, 2)
         self.accuracy_label = QLabel("0%")
         self.accuracy_label.setStyleSheet("QLabel { font-weight: bold; font-size: 14px; color: #4CAF50; }")
@@ -562,6 +592,7 @@ class PracticeWidget(QWidget):
             self.accurate_label.setText("0")
             self.early_label.setText("0")
             self.late_label.setText("0")
+            self.missed_label.setText("0")
             self.accuracy_label.setText("0%")
             self.avg_offset_label.setText("0ms")
             self.practice_status_label.setText("Statistics reset - ready for new session!")
@@ -571,23 +602,28 @@ class PracticeWidget(QWidget):
         print(f"DEBUG: GET_STATS response: '{response}'")
         if response.startswith("CMD_RESP STATS"):
             try:
-                # Parse: CMD_RESP STATS TOTAL:10 ACC:8 EARLY:1 LATE:1 ACCURACY:80% AVGOFF:5
+                # Parse: CMD_RESP STATS TOTAL:10 ACC:8 EARLY:1 LATE:1 MISSED:2 BEATS:15 ACCURACY:53% AVGOFF:5
                 parts = response.split()
                 
                 total = parts[2].split(':')[1]
                 accurate = parts[3].split(':')[1] 
                 early = parts[4].split(':')[1]
                 late = parts[5].split(':')[1]
-                accuracy = parts[6].split(':')[1]
-                avg_offset = parts[7].split(':')[1]
+                missed = parts[6].split(':')[1]
+                beats = parts[7].split(':')[1]
+                accuracy = parts[8].split(':')[1]
+                avg_offset = parts[9].split(':')[1]
                 
                 # Update labels
-                self.total_strikes_label.setText(total)
+                self.total_strikes_label.setText(f"{total} / {beats} beats")
                 self.accurate_label.setText(f"{accurate} ({accuracy})")
                 self.early_label.setText(early)
                 self.late_label.setText(late)
                 self.accuracy_label.setText(accuracy)
                 self.avg_offset_label.setText(f"{avg_offset}ms")
+                
+                # Update missed beats display
+                self.missed_label.setText(missed)
                 
             except (IndexError, ValueError) as e:
                 print(f"Error parsing stats: {e}")
@@ -602,15 +638,17 @@ class PracticeWidget(QWidget):
         
         if stats_response.startswith("CMD_RESP STATS"):
             try:
-                # Parse final statistics
+                # Parse final statistics with new format
                 parts = stats_response.split()
                 total_strikes = int(parts[2].split(':')[1])
                 accurate_strikes = int(parts[3].split(':')[1])
                 early_strikes = int(parts[4].split(':')[1])
                 late_strikes = int(parts[5].split(':')[1])
-                accuracy_str = parts[6].split(':')[1].replace('%', '')
+                missed_beats = int(parts[6].split(':')[1])
+                total_beats = int(parts[7].split(':')[1])
+                accuracy_str = parts[8].split(':')[1].replace('%', '')
                 accuracy_percentage = float(accuracy_str)
-                avg_offset = int(parts[7].split(':')[1])
+                avg_offset = int(parts[9].split(':')[1])
                 
                 # Calculate session duration
                 end_time = datetime.now()
@@ -626,6 +664,8 @@ class PracticeWidget(QWidget):
                     'accurate_strikes': accurate_strikes,
                     'early_strikes': early_strikes,
                     'late_strikes': late_strikes,
+                    'missed_beats': missed_beats,
+                    'total_beats': total_beats,
                     'accuracy_percentage': accuracy_percentage,
                     'avg_timing_offset': avg_offset,
                     'notes': ''
@@ -763,9 +803,9 @@ class ProgressWidget(QWidget):
         sessions_layout = QVBoxLayout()
         
         self.sessions_table = QTableWidget()
-        self.sessions_table.setColumnCount(6)
+        self.sessions_table.setColumnCount(7)
         self.sessions_table.setHorizontalHeaderLabels([
-            "Date", "Duration", "BPM", "Strikes", "Accuracy", "Avg Offset"
+            "Date", "Duration", "BPM", "Strikes/Beats", "Missed", "Accuracy", "Avg Offset"
         ])
         
         # Make table headers resize to content
@@ -828,16 +868,29 @@ class ProgressWidget(QWidget):
             for i, session in enumerate(recent_sessions):
                 # session format: (id, start_time, end_time, duration_seconds, bpm, 
                 #                  total_strikes, accurate_strikes, early_strikes, late_strikes, 
-                #                  accuracy_percentage, avg_timing_offset, notes, created_at)
+                #                  missed_beats, total_beats, accuracy_percentage, avg_timing_offset, notes, created_at)
                 start_time = datetime.fromisoformat(session[1]).strftime("%m/%d %H:%M")
                 duration_str = f"{session[3]//60}:{session[3]%60:02d}"
+                
+                # Handle both old and new database formats
+                if len(session) >= 13:  # New format with missed_beats and total_beats
+                    strikes_beats = f"{session[5]}/{session[10]}"
+                    missed = str(session[9])
+                    accuracy = f"{float(session[11] or 0):.1f}%"
+                    avg_offset = f"{session[12]}ms"
+                else:  # Old format compatibility
+                    strikes_beats = str(session[5])
+                    missed = "N/A"
+                    accuracy = f"{float(session[9] or 0):.1f}%"
+                    avg_offset = f"{session[10]}ms"
                 
                 self.sessions_table.setItem(i, 0, QTableWidgetItem(start_time))
                 self.sessions_table.setItem(i, 1, QTableWidgetItem(duration_str))
                 self.sessions_table.setItem(i, 2, QTableWidgetItem(str(session[4])))
-                self.sessions_table.setItem(i, 3, QTableWidgetItem(str(session[5])))
-                self.sessions_table.setItem(i, 4, QTableWidgetItem(f"{session[9]:.1f}%"))
-                self.sessions_table.setItem(i, 5, QTableWidgetItem(f"{session[10]}ms"))
+                self.sessions_table.setItem(i, 3, QTableWidgetItem(strikes_beats))
+                self.sessions_table.setItem(i, 4, QTableWidgetItem(missed))
+                self.sessions_table.setItem(i, 5, QTableWidgetItem(accuracy))
+                self.sessions_table.setItem(i, 6, QTableWidgetItem(avg_offset))
             
             # Update daily summary table
             daily_summaries = self.database.get_daily_summaries(7)
@@ -852,8 +905,8 @@ class ProgressWidget(QWidget):
                 self.daily_table.setItem(i, 0, QTableWidgetItem(date_str))
                 self.daily_table.setItem(i, 1, QTableWidgetItem(str(day_summary[2])))
                 self.daily_table.setItem(i, 2, QTableWidgetItem(time_str))
-                self.daily_table.setItem(i, 3, QTableWidgetItem(f"{day_summary[3]:.1f}%"))
-                self.daily_table.setItem(i, 4, QTableWidgetItem(f"{day_summary[4]:.1f}%"))
+                self.daily_table.setItem(i, 3, QTableWidgetItem(f"{float(day_summary[3] or 0):.1f}%"))
+                self.daily_table.setItem(i, 4, QTableWidgetItem(f"{float(day_summary[4] or 0):.1f}%"))
                 
         except Exception as e:
             print(f"Error refreshing progress data: {e}")

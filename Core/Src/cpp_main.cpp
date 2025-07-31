@@ -74,6 +74,8 @@ typedef struct {
     uint32_t accurate_strikes;  // Within ±50ms
     uint32_t early_strikes;
     uint32_t late_strikes;
+    uint32_t missed_beats;      // Beats with no strike
+    uint32_t total_beats;       // Total metronome beats during practice
     int32_t avg_timing_offset;  // Average timing offset in ms
     uint32_t session_start_time;
     uint32_t session_duration;
@@ -82,6 +84,13 @@ typedef struct {
 
 static practice_stats_t current_session;
 static bool practice_mode_active = false;
+
+// Missed beat tracking
+static TickType_t last_beat_with_strike = 0;
+static uint32_t metronome_beat_count = 0;
+
+// Track which beat was last claimed by a strike to prevent double-counting
+static TickType_t last_claimed_beat_time = 0;
 
 void cpp_main()
 {
@@ -362,18 +371,17 @@ void strike_task(void *pvParameters)
             // Calculate difference from last metronome tick (both in ticks)
             time_diff = (int32_t)(strike_data.sensor.timestamp - strike_data.metronome_tick_timestamp);
             
-            // Debug: print raw values
-            printf("DEBUG: strike=%lu, metro=%lu, raw_diff=%ld, half_period=%lu, period=%lu\n",
-                   strike_data.sensor.timestamp, strike_data.metronome_tick_timestamp, 
-                   (long)time_diff, metronome->get_half_period(), metronome->get_period());
+            // Determine which beat this strike is targeting
+            TickType_t target_beat_time;
             
-            // Determine if strike belongs to last tick (late) or next tick (early)
             if (time_diff <= (int32_t)metronome->get_half_period()) {
                 // Strike is within half period → late for the previous tick
+                target_beat_time = strike_data.metronome_tick_timestamp;
                 printf("Strike. Time diff: +%ld ms (late for beat, practice_mode: %s)\n", 
                        (long)time_diff, practice_mode_active ? "ON" : "OFF");
             } else {
                 // Strike is beyond half period → early for the next tick
+                target_beat_time = strike_data.metronome_tick_timestamp + metronome->get_period();
                 time_diff = time_diff - (int32_t)metronome->get_period();
                 printf("Strike. Time diff: %ld ms (early for next beat, practice_mode: %s)\n", 
                        (long)time_diff, practice_mode_active ? "ON" : "OFF");
@@ -381,7 +389,17 @@ void strike_task(void *pvParameters)
             
             // Update practice stats if in practice mode
             if (practice_mode_active) {
-                update_practice_stats(time_diff);
+                // Check if this beat has already been claimed by a previous strike
+                if (target_beat_time != last_claimed_beat_time) {
+                    // This is a new beat - count it
+                    update_practice_stats(time_diff);
+                    last_claimed_beat_time = target_beat_time;
+                    last_beat_with_strike = strike_data.sensor.timestamp;
+                    printf("Beat claimed. Target beat time: %lu\n", target_beat_time);
+                } else {
+                    // This beat already claimed - ignore extra strike
+                    printf("Extra strike ignored (beat already claimed at time %lu)\n", target_beat_time);
+                }
             }
             
         }
@@ -424,8 +442,25 @@ void metronome_tick_task(void *pvParameters)
         xSemaphoreTake(xmetronome_timer_period_elapsed, portMAX_DELAY);
         metronome->tick();
         
-        //vTaskDelay(pdMS_TO_TICKS(1000));
-        //printf("Metronome tick\n");
+        // Track beats and missed beats during practice mode
+        if (practice_mode_active) {
+            metronome_beat_count++;
+            current_session.total_beats++;
+            
+            // Check if previous beat was missed (no strike within acceptable window)
+            TickType_t current_tick = metronome->get_last_tick_time();
+            
+            // If this isn't the first beat and no strike occurred near the previous beat
+            if (metronome_beat_count > 1) {
+                TickType_t time_since_last_strike = current_tick - last_beat_with_strike;
+                
+                // If last strike was more than 1.5 periods ago, previous beat was missed
+                if (time_since_last_strike > (metronome->get_period() + metronome->get_half_period())) {
+                    current_session.missed_beats++;
+                    printf("Missed beat detected! Total missed: %lu\n", current_session.missed_beats);
+                }
+            }
+        }
 
         //blink metronome's led
         HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
@@ -447,6 +482,12 @@ void reset_practice_stats(void)
 {
     memset(&current_session, 0, sizeof(practice_stats_t));
     current_session.session_start_time = xTaskGetTickCount();
+    
+    // Reset missed beat tracking
+    last_beat_with_strike = xTaskGetTickCount();
+    metronome_beat_count = 0;
+    last_claimed_beat_time = 0;
+    
     printf("Practice statistics reset\n");
 }
 
@@ -649,14 +690,19 @@ void process_command(char* command, char* response)
     }
     else if (strncmp(command, "GET_STATS", 9) == 0) {
         printf("Matched GET_STATS\n");
-        if (current_session.total_strikes > 0) {
-            uint32_t accuracy = (current_session.accurate_strikes * 100) / current_session.total_strikes;
-            sprintf(response, "CMD_RESP STATS TOTAL:%lu ACC:%lu EARLY:%lu LATE:%lu ACCURACY:%lu%% AVGOFF:%ld\n",
+        if (current_session.total_beats > 0) {
+            // Calculate accuracy based on total beats (including missed beats)
+            uint32_t total_events = current_session.total_beats;  // All beats that should have been hit
+            uint32_t successful_hits = current_session.accurate_strikes;
+            uint32_t accuracy = (successful_hits * 100) / total_events;
+            
+            sprintf(response, "CMD_RESP STATS TOTAL:%lu ACC:%lu EARLY:%lu LATE:%lu MISSED:%lu BEATS:%lu ACCURACY:%lu%% AVGOFF:%ld\n",
                     current_session.total_strikes, current_session.accurate_strikes, 
                     current_session.early_strikes, current_session.late_strikes,
+                    current_session.missed_beats, current_session.total_beats,
                     accuracy, current_session.avg_timing_offset);
         } else {
-            sprintf(response, "CMD_RESP STATS TOTAL:0 ACC:0 EARLY:0 LATE:0 ACCURACY:0%% AVGOFF:0\n");
+            sprintf(response, "CMD_RESP STATS TOTAL:0 ACC:0 EARLY:0 LATE:0 MISSED:0 BEATS:0 ACCURACY:0%% AVGOFF:0\n");
         }
         printf("Sending GET_STATS response: '%s'\n", response);
     }
