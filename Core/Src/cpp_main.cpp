@@ -364,29 +364,37 @@ void strike_task(void *pvParameters)
     UNUSED(pvParameters);
     strike_t strike_data;
     int32_t time_diff; // difference between the strike and metronome tick timestamps (signed)
+    char strike_msg[64];
 
     for(;;) {
         // wait for a strike to be detected (element in queue)
         if (xQueueReceive(strikes_queue, &strike_data, portMAX_DELAY) == pdTRUE) {
             // Calculate difference from last metronome tick (both in ticks)
             time_diff = (int32_t)(strike_data.sensor.timestamp - strike_data.metronome_tick_timestamp);
-            
+
             // Determine which beat this strike is targeting
             TickType_t target_beat_time;
-            
+
             if (time_diff <= (int32_t)metronome->get_half_period()) {
                 // Strike is within half period → late for the previous tick
                 target_beat_time = strike_data.metronome_tick_timestamp;
-                printf("Strike. Time diff: +%ld ms (late for beat, practice_mode: %s)\n", 
+                printf("Strike. Time diff: +%ld ms (late for beat, practice_mode: %s)\n",
                        (long)time_diff, practice_mode_active ? "ON" : "OFF");
             } else {
                 // Strike is beyond half period → early for the next tick
                 target_beat_time = strike_data.metronome_tick_timestamp + metronome->get_period();
                 time_diff = time_diff - (int32_t)metronome->get_period();
-                printf("Strike. Time diff: %ld ms (early for next beat, practice_mode: %s)\n", 
+                printf("Strike. Time diff: %ld ms (early for next beat, practice_mode: %s)\n",
                        (long)time_diff, practice_mode_active ? "ON" : "OFF");
             }
-            
+
+            // Send real-time strike timing event for visual feedback
+            sprintf(strike_msg, "EVENT STRIKE %ld\n", (long)time_diff);
+            if (xSemaphoreTake(xuart_tx_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                uart_write(&huart2, (uint8_t*)strike_msg, strlen(strike_msg), 1000);
+                xSemaphoreGive(xuart_tx_mutex);
+            }
+
             // Update practice stats if in practice mode
             if (practice_mode_active) {
                 // Check if this beat has already been claimed by a previous strike
@@ -401,7 +409,7 @@ void strike_task(void *pvParameters)
                     printf("Extra strike ignored (beat already claimed at time %lu)\n", target_beat_time);
                 }
             }
-            
+
         }
 
         

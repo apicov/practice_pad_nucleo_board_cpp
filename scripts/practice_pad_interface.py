@@ -10,12 +10,12 @@ import threading
 import sqlite3
 import json
 from datetime import datetime, timedelta
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout,
                              QWidget, QPushButton, QLabel, QSpinBox, QComboBox,
                              QTextEdit, QGroupBox, QGridLayout, QProgressBar, QFrame,
                              QTableWidget, QTableWidgetItem, QTabWidget, QHeaderView)
-from PyQt5.QtCore import QTimer, pyqtSignal, QObject, pyqtSlot, Qt
-from PyQt5.QtGui import QFont, QPalette, QColor
+from PyQt5.QtCore import QTimer, pyqtSignal, QObject, pyqtSlot, Qt, QPropertyAnimation, QRect
+from PyQt5.QtGui import QFont, QPalette, QColor, QPainter, QPen, QBrush
 import serial
 import serial.tools.list_ports
 
@@ -227,15 +227,18 @@ class PracticeDatabase:
 
 class SerialController(QObject):
     """Handles serial communication with the STM32"""
-    
+
     status_updated = pyqtSignal(str)
     response_received = pyqtSignal(str)
     connection_changed = pyqtSignal(bool)
-    
+    strike_event = pyqtSignal(int)  # Signal for strike timing events (offset in ms)
+
     def __init__(self):
         super().__init__()
         self.serial_port = None
         self.is_connected = False
+        self.read_thread = None
+        self.running = False
         
     def list_ports(self):
         """Return list of available serial ports"""
@@ -247,17 +250,23 @@ class SerialController(QObject):
         try:
             if self.serial_port and self.serial_port.is_open:
                 self.serial_port.close()
-                
+
             self.serial_port = serial.Serial(port, baudrate, timeout=1)
             time.sleep(2)  # Wait for connection to stabilize
-            
+
             # Flush any pending data
             self.serial_port.reset_input_buffer()
             self.serial_port.reset_output_buffer()
-            
+
             self.is_connected = True
             self.connection_changed.emit(True)
             self.status_updated.emit(f"Connected to {port}")
+
+            # Start background thread for reading events
+            self.running = True
+            self.read_thread = threading.Thread(target=self._read_events, daemon=True)
+            self.read_thread.start()
+
             return True
         except Exception as e:
             self.status_updated.emit(f"Connection failed: {str(e)}")
@@ -266,11 +275,52 @@ class SerialController(QObject):
     
     def disconnect(self):
         """Disconnect from serial port"""
+        self.running = False
+        if self.read_thread and self.read_thread.is_alive():
+            self.read_thread.join(timeout=2)
         if self.serial_port and self.serial_port.is_open:
             self.serial_port.close()
         self.is_connected = False
         self.connection_changed.emit(False)
         self.status_updated.emit("Disconnected")
+
+    def _read_events(self):
+        """Background thread to read events from serial port"""
+        current_line = ""
+        while self.running and self.serial_port and self.serial_port.is_open:
+            try:
+                if self.serial_port.in_waiting > 0:
+                    chunk = self.serial_port.read(self.serial_port.in_waiting)
+                    if chunk:
+                        text = chunk.decode('utf-8', errors='replace')
+
+                        for char in text:
+                            if char in ['\n', '\r']:
+                                if current_line.strip():
+                                    line = current_line.strip()
+
+                                    # Check for EVENT STRIKE messages
+                                    if line.startswith('EVENT STRIKE'):
+                                        try:
+                                            parts = line.split()
+                                            if len(parts) >= 3:
+                                                offset = int(parts[2])
+                                                self.strike_event.emit(offset)
+                                        except (ValueError, IndexError):
+                                            pass
+                                    else:
+                                        # Log other messages
+                                        self.status_updated.emit(f"MCU: {line}")
+
+                                current_line = ""
+                            else:
+                                current_line += char
+
+                time.sleep(0.01)  # Small delay to prevent CPU hogging
+            except Exception as e:
+                if self.running:  # Only report error if still running
+                    self.status_updated.emit(f"Read error: {e}")
+                time.sleep(0.1)
     
     def send_command(self, command):
         """Send command to STM32 and return response"""
@@ -447,9 +497,133 @@ class MetronomeWidget(QWidget):
         self.status_label.setText(message)
 
 
+class TimingBarWidget(QWidget):
+    """Visual timing feedback widget showing strike accuracy"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.timing_offset = 0  # Current timing offset in ms
+        self.max_offset = 200  # Max offset to display (±200ms)
+        self.setMinimumHeight(80)
+        self.setMinimumWidth(400)
+
+        # Animation timer for fading effect
+        self.fade_timer = QTimer()
+        self.fade_timer.timeout.connect(self.fade_indicator)
+        self.indicator_alpha = 0
+
+    def set_timing(self, offset_ms):
+        """Update the timing offset and trigger repaint"""
+        self.timing_offset = max(-self.max_offset, min(self.max_offset, offset_ms))
+        self.indicator_alpha = 255
+        self.update()
+
+        # Start fade timer
+        self.fade_timer.stop()
+        self.fade_timer.start(50)  # Fade every 50ms
+
+    def fade_indicator(self):
+        """Gradually fade the indicator"""
+        if self.indicator_alpha > 0:
+            self.indicator_alpha = max(0, self.indicator_alpha - 15)
+            self.update()
+        else:
+            self.fade_timer.stop()
+
+    def paintEvent(self, event):
+        """Custom paint event to draw the timing bar"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        width = self.width()
+        height = self.height()
+        center_x = width // 2
+
+        # Draw background
+        painter.fillRect(0, 0, width, height, QColor(240, 240, 240))
+
+        # Draw the timing zones
+        zone_height = height - 20
+        zone_y = 10
+
+        # Early zone (left, orange)
+        early_width = center_x - 40
+        painter.fillRect(10, zone_y, early_width, zone_height, QColor(255, 152, 0, 80))
+
+        # Perfect zone (center, green)
+        painter.fillRect(center_x - 40, zone_y, 80, zone_height, QColor(76, 175, 80, 120))
+
+        # Late zone (right, blue)
+        late_width = center_x - 40
+        painter.fillRect(center_x + 40, zone_y, late_width, zone_height, QColor(33, 150, 243, 80))
+
+        # Draw center line (perfect timing)
+        painter.setPen(QPen(QColor(0, 0, 0), 2))
+        painter.drawLine(center_x, zone_y, center_x, zone_y + zone_height)
+
+        # Draw scale markers
+        painter.setPen(QPen(QColor(100, 100, 100), 1))
+        font = QFont()
+        font.setPointSize(8)
+        painter.setFont(font)
+
+        # -100ms marker
+        marker_x = center_x - (100 * (center_x - 50) // self.max_offset)
+        painter.drawLine(marker_x, zone_y, marker_x, zone_y + 10)
+        painter.drawText(marker_x - 15, zone_y - 2, "-100ms")
+
+        # +100ms marker
+        marker_x = center_x + (100 * (center_x - 50) // self.max_offset)
+        painter.drawLine(marker_x, zone_y, marker_x, zone_y + 10)
+        painter.drawText(marker_x - 15, zone_y - 2, "+100ms")
+
+        # 0ms (perfect)
+        painter.drawText(center_x - 10, zone_y - 2, "0ms")
+
+        # Draw labels
+        font.setPointSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor(255, 152, 0)))
+        painter.drawText(60, height - 3, "EARLY")
+        painter.setPen(QPen(QColor(76, 175, 80)))
+        painter.drawText(center_x - 20, height - 3, "PERFECT")
+        painter.setPen(QPen(QColor(33, 150, 243)))
+        painter.drawText(width - 80, height - 3, "LATE")
+
+        # Draw timing indicator (vertical bar)
+        if self.indicator_alpha > 0:
+            # Calculate position based on timing offset
+            offset_ratio = self.timing_offset / self.max_offset
+            indicator_x = center_x + int(offset_ratio * (center_x - 50))
+
+            # Choose color based on accuracy
+            if abs(self.timing_offset) <= 30:
+                indicator_color = QColor(76, 175, 80, self.indicator_alpha)  # Green
+            elif abs(self.timing_offset) <= 50:
+                indicator_color = QColor(255, 193, 7, self.indicator_alpha)  # Yellow
+            elif self.timing_offset < 0:
+                indicator_color = QColor(255, 152, 0, self.indicator_alpha)  # Orange (early)
+            else:
+                indicator_color = QColor(33, 150, 243, self.indicator_alpha)  # Blue (late)
+
+            # Draw indicator bar
+            painter.fillRect(indicator_x - 5, zone_y, 10, zone_height, indicator_color)
+
+            # Draw timing value
+            painter.setPen(QPen(QColor(0, 0, 0, self.indicator_alpha)))
+            font.setPointSize(12)
+            font.setBold(True)
+            painter.setFont(font)
+            offset_text = f"{self.timing_offset:+d}ms"
+            text_width = painter.fontMetrics().width(offset_text)
+            text_x = max(10, min(width - text_width - 10, indicator_x - text_width // 2))
+            painter.drawText(text_x, zone_y + zone_height // 2, offset_text)
+
+
 class PracticeWidget(QWidget):
     """Widget for practice sessions and analytics"""
-    
+
     def __init__(self, serial_controller, database):
         super().__init__()
         self.serial_controller = serial_controller
@@ -458,30 +632,45 @@ class PracticeWidget(QWidget):
         self.session_start_time = None
         self.current_bpm = 60
         self.init_ui()
-        
+
         # Auto-refresh timer for stats
         self.stats_timer = QTimer()
         self.stats_timer.timeout.connect(self.refresh_stats)
+
+        # Connect strike events to timing bar
+        self.serial_controller.strike_event.connect(self.on_strike_event)
+
+    @pyqtSlot(int)
+    def on_strike_event(self, offset_ms):
+        """Handle incoming strike event from microcontroller"""
+        self.timing_bar.set_timing(offset_ms)
         
     def init_ui(self):
         layout = QVBoxLayout()
-        
+
+        # Visual Timing Feedback Bar
+        timing_group = QGroupBox("Real-time Timing Feedback")
+        timing_layout = QVBoxLayout()
+        self.timing_bar = TimingBarWidget()
+        timing_layout.addWidget(self.timing_bar)
+        timing_group.setLayout(timing_layout)
+
         # Practice Session Control
         session_group = QGroupBox("Practice Session")
         session_layout = QHBoxLayout()
-        
+
         self.start_practice_btn = QPushButton("Start Practice")
         self.start_practice_btn.clicked.connect(self.start_practice)
         self.start_practice_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
-        
+
         self.stop_practice_btn = QPushButton("Stop Practice")
         self.stop_practice_btn.clicked.connect(self.stop_practice)
         self.stop_practice_btn.setStyleSheet("QPushButton { background-color: #f44336; color: white; font-weight: bold; }")
         self.stop_practice_btn.setEnabled(False)
-        
+
         self.reset_stats_btn = QPushButton("Reset Stats")
         self.reset_stats_btn.clicked.connect(self.reset_stats)
-        
+
         session_layout.addWidget(self.start_practice_btn)
         session_layout.addWidget(self.stop_practice_btn)
         session_layout.addWidget(self.reset_stats_btn)
@@ -538,11 +727,12 @@ class PracticeWidget(QWidget):
         
         status_layout.addWidget(self.practice_status_label)
         status_group.setLayout(status_layout)
-        
+
+        layout.addWidget(timing_group)
         layout.addWidget(session_group)
-        layout.addWidget(stats_group) 
+        layout.addWidget(stats_group)
         layout.addWidget(status_group)
-        
+
         self.setLayout(layout)
         
     def start_practice(self):
